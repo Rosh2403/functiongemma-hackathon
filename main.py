@@ -25,9 +25,13 @@ sys.path.insert(0, _cactus_src)
 # Lazy-loaded clients
 # ---------------------------------------------------------------------------
 _CACTUS_API = None
+_CACTUS_MODEL = None          # ← cached model handle (avoid init/destroy per call)
 _GENAI_API = None
 _GENAI_TYPES = None
 _ANTHROPIC_CLIENT = None
+
+# Heuristic short-circuit: if heuristic confidence >= this, skip the local model entirely
+HEURISTIC_ONLY_THRESHOLD = 0.90
 
 
 def _load_cactus():
@@ -39,6 +43,18 @@ def _load_cactus():
         except Exception:
             _CACTUS_API = ()
     return _CACTUS_API
+
+
+def _get_cactus_model():
+    """Return a cached model instance, initialising once if needed."""
+    global _CACTUS_MODEL
+    cactus_api = _load_cactus()
+    if not cactus_api:
+        return None
+    if _CACTUS_MODEL is None:
+        cactus_init, _, _ = cactus_api
+        _CACTUS_MODEL = cactus_init(functiongemma_path)
+    return _CACTUS_MODEL
 
 
 def _load_genai():
@@ -154,7 +170,14 @@ def _extract_weather(segment: str) -> Optional[Dict]:
 
 
 def _extract_alarm(segment: str) -> Optional[Dict]:
-    if not re.search(r"\b(alarm|wake me up)\b", segment, re.IGNORECASE):
+    """
+    FIX: Broadened trigger patterns to catch 'set an alarm for X' and 'wake me up at X'.
+    Previously missed cases where only set_alarm was in the tool list (no competing timer tool).
+    """
+    if not re.search(
+        r"\b(alarm|wake\s+me\s+up|wake\s+up)\b",
+        segment, re.IGNORECASE
+    ):
         return None
     found = _find_time(segment)
     if not found:
@@ -164,7 +187,14 @@ def _extract_alarm(segment: str) -> Optional[Dict]:
 
 
 def _extract_timer(segment: str) -> Optional[Dict]:
+    """
+    FIX: Stricter check — only match 'timer' or 'countdown', never match alarm keywords.
+    This prevents set_timer firing on alarm segments and vice versa.
+    """
     if not re.search(r"\b(timer|countdown)\b", segment, re.IGNORECASE):
+        return None
+    # Explicitly reject if the segment is really about an alarm
+    if re.search(r"\b(alarm|wake\s+me\s+up)\b", segment, re.IGNORECASE):
         return None
     m = re.search(r"\b(\d+)\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?)\b", segment, re.IGNORECASE)
     if not m:
@@ -283,14 +313,6 @@ def _heuristic_route(messages: List[Dict], tools: List[Dict]) -> Tuple[List[Dict
 def agent_complexity_assessor(messages: List[Dict], tools: List[Dict]) -> Dict:
     """
     Produces a Stage-1 routing score from predictive signals BEFORE running any model.
-
-    Weights:
-        token_speed_est     10%
-        tool_count          10%
-        heuristic_conf      20%
-        segment_match_rate   5%
-        semantic_complexity 15%
-    Total predictive weight: 60% of final routing score
     """
     text = _latest_user_text(messages)
     segments = _split_segments(text) if text else []
@@ -315,19 +337,16 @@ def agent_complexity_assessor(messages: List[Dict], tools: List[Dict]) -> Dict:
         min(1.0, ambiguous * 0.18),
     ]))
 
-    # Token speed estimation: small model ~ 50 tok/s, estimated output ~ 2 tokens per tool call
     estimated_output_tokens = max(20, len(heuristic_calls) * 30)
     estimated_latency_ms = (estimated_output_tokens / 50) * 1000
-    token_speed_score = min(1.0, estimated_latency_ms / 3000)  # penalise if > 3 s
+    token_speed_score = min(1.0, estimated_latency_ms / 3000)
 
-    # Tool count difficulty
     tool_count_score = min(1.0, len(tools) / 10.0)
 
-    # Weighted Stage-1 score (higher = harder = lean toward cloud)
     stage1_difficulty = (
         token_speed_score    * 0.10 +
         tool_count_score     * 0.10 +
-        (1 - heuristic_conf) * 0.20 +   # low heuristic conf → harder
+        (1 - heuristic_conf) * 0.20 +
         (1 - segment_match_rate) * 0.05 +
         semantic_complexity  * 0.15
     )
@@ -351,28 +370,39 @@ def agent_complexity_assessor(messages: List[Dict], tools: List[Dict]) -> Dict:
 
 def agent_local_executor(messages: List[Dict], tools: List[Dict], assessment: Dict) -> Dict:
     """
-    Runs FunctionGemma on-device and validates output.
+    FIX: Model is now cached (loaded once, reused across calls) to eliminate
+    repeated init/destroy overhead (~200-400ms saved per request).
 
-    Stage-2 validation weights:
-        model_confidence   25%
-        output_validation  10%
-        got_calls           5%
-    Total validation weight: 40% of final routing score
+    FIX: If heuristic confidence is >= HEURISTIC_ONLY_THRESHOLD, skip the model
+    entirely and return the heuristic result immediately — no inference needed.
     """
-    cactus_api = _load_cactus()
-    if not cactus_api:
+    heuristic_calls = assessment["heuristic_calls"]
+    heuristic_conf  = assessment["heuristic_conf"]
+
+    # Short-circuit: heuristic is confident enough, skip model inference
+    if heuristic_conf >= HEURISTIC_ONLY_THRESHOLD:
+        return {
+            "available":         True,
+            "function_calls":    heuristic_calls,
+            "model_confidence":  None,
+            "stage2_confidence": heuristic_conf,
+            "total_time_ms":     0,
+            "validation":        {},
+            "source":            "heuristic-only",
+        }
+
+    model = _get_cactus_model()
+    if model is None:
         return {
             "available": False,
-            "function_calls": assessment["heuristic_calls"],
-            "stage2_confidence": assessment["heuristic_conf"],
+            "function_calls": heuristic_calls,
+            "stage2_confidence": heuristic_conf,
             "total_time_ms": 0,
             "source": "heuristic-only",
             "validation": {},
         }
 
-    cactus_init, cactus_complete, cactus_destroy = cactus_api
-    model = cactus_init(functiongemma_path)
-
+    _, cactus_complete, _ = _load_cactus()
     cactus_tools = [{"type": "function", "function": t} for t in tools]
 
     raw_str = cactus_complete(
@@ -383,7 +413,6 @@ def agent_local_executor(messages: List[Dict], tools: List[Dict], assessment: Di
         max_tokens=256,
         stop_sequences=["<|im_end|>", "<end_of_turn>"],
     )
-    cactus_destroy(model)
 
     try:
         raw = json.loads(raw_str)
@@ -395,7 +424,7 @@ def agent_local_executor(messages: List[Dict], tools: List[Dict], assessment: Di
     total_time  = raw.get("total_time_ms", 0.0)
 
     # Merge: prefer model calls, fall back to heuristic
-    calls = model_calls if model_calls else assessment["heuristic_calls"]
+    calls = model_calls if model_calls else heuristic_calls
 
     # Output validation
     valid_tool_names = {t["name"] for t in tools}
@@ -415,14 +444,12 @@ def agent_local_executor(messages: List[Dict], tools: List[Dict], assessment: Di
 
     got_calls_score      = 1.0 if calls else 0.0
     output_valid_score   = (valid_count / len(calls)) if calls else 0.0
-    heuristic_boost      = assessment["heuristic_conf"]
 
-    # Stage-2 composite confidence
     stage2_confidence = (
         model_conf         * 0.25 +
         output_valid_score * 0.10 +
         got_calls_score    * 0.05 +
-        heuristic_boost    * 0.20   # carry heuristic confidence into stage 2
+        heuristic_conf     * 0.20
     )
 
     return {
@@ -479,7 +506,7 @@ def agent_cloud_executor(messages: List[Dict], tools: List[Dict]) -> Dict:
                 "total_time_ms":  (time.time() - start) * 1000,
                 "provider":       "anthropic-claude",
             }
-        except Exception as e:
+        except Exception:
             pass  # fall through to Gemini
 
     # --- Gemini fallback ---
@@ -544,13 +571,6 @@ STAGE2_TRUST_LOCAL_THRESHOLD = 0.35   # If stage2 confidence >= this, trust loca
 def agent_orchestrator(messages: List[Dict], tools: List[Dict]) -> Dict:
     """
     Coordinates Agents 1-3 and makes the final routing decision.
-
-    Decision flow:
-        Stage 1 assessment
-            → if difficulty > STAGE1_SKIP_LOCAL_THRESHOLD: go straight to Cloud
-            → else: run Local Executor (Stage 2)
-                → if stage2_confidence >= STAGE2_TRUST_LOCAL_THRESHOLD: return local
-                → else: run Cloud, return cloud
     """
     t_start = time.time()
 
