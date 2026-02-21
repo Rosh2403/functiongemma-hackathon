@@ -174,12 +174,14 @@ def agent_complexity_assessor(messages: List[Dict], tools: List[Dict]) -> Dict:
     token_speed_score       = min(1.0, (estimated_output_tokens / 50) * 1000 / 3000)
     tool_count_score        = min(1.0, len(tools) / 10.0)
 
-    stage1_difficulty = (
+    stage1_difficulty_raw = (
         token_speed_score   * 0.15 +
         tool_count_score    * 0.15 +
         semantic_complexity * 0.40 +
         min(1.0, (segment_count - 1) * 0.25) * 0.30
     )
+    # Keep routing score on a strict 0..1 scale so threshold comparisons remain reachable.
+    stage1_difficulty = max(0.0, min(1.0, stage1_difficulty_raw))
 
     return {
         "stage1_difficulty":   round(stage1_difficulty, 4),
