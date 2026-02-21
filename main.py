@@ -17,8 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # Paths — set via environment variables so any machine works without editing this file
 # Example: export CACTUS_SRC="/your/path/cactus/python/src"
 #          export CACTUS_WEIGHTS="/your/path/cactus/weights/functiongemma-270m-it"
-_cactus_src     = os.environ.get("CACTUS_SRC",     "/Users/bviveka/cactus/python/src")
-functiongemma_path = os.environ.get("CACTUS_WEIGHTS", "/Users/bviveka/cactus/weights/functiongemma-270m-it")
+_cactus_src     = os.environ.get("CACTUS_SRC",     "cactus/python/src")
+functiongemma_path = os.environ.get("CACTUS_WEIGHTS", "weights/functiongemma-270m-it")
 sys.path.insert(0, _cactus_src)
 
 # ---------------------------------------------------------------------------
@@ -343,13 +343,15 @@ def agent_complexity_assessor(messages: List[Dict], tools: List[Dict]) -> Dict:
 
     tool_count_score = min(1.0, len(tools) / 10.0)
 
-    stage1_difficulty = (
+    stage1_difficulty_raw = (
         token_speed_score    * 0.10 +
         tool_count_score     * 0.10 +
         (1 - heuristic_conf) * 0.20 +
         (1 - segment_match_rate) * 0.05 +
         semantic_complexity  * 0.15
     )
+    # Keep score on 0..1 scale for stable thresholding across future weight changes.
+    stage1_difficulty = max(0.0, min(1.0, stage1_difficulty_raw))
 
     return {
         "stage1_difficulty":     round(stage1_difficulty, 4),
@@ -564,7 +566,7 @@ def agent_cloud_executor(messages: List[Dict], tools: List[Dict]) -> Dict:
 # ---------------------------------------------------------------------------
 
 # Routing thresholds (tunable)
-STAGE1_SKIP_LOCAL_THRESHOLD  = 0.90   # If stage1 difficulty > this, skip local entirely
+STAGE1_SKIP_LOCAL_THRESHOLD  = 0.35   # If stage1 difficulty > this, skip local entirely
 STAGE2_TRUST_LOCAL_THRESHOLD = 0.35   # If stage2 confidence >= this, trust local result
 
 
