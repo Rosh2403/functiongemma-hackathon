@@ -564,7 +564,7 @@ def agent_cloud_executor(messages: List[Dict], tools: List[Dict]) -> Dict:
 # ---------------------------------------------------------------------------
 
 # Routing thresholds (tunable)
-STAGE1_SKIP_LOCAL_THRESHOLD  = 0.90   # If stage1 difficulty > this, skip local entirely
+STAGE1_SKIP_LOCAL_THRESHOLD  = 0.35   # If stage1 difficulty > this, skip local entirely
 STAGE2_TRUST_LOCAL_THRESHOLD = 0.35   # If stage2 confidence >= this, trust local result
 
 
