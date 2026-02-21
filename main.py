@@ -231,6 +231,33 @@ def _heuristic_route(messages: List[Dict], tools: List[Dict]):
     return calls, confidence
 
 
+def _complexity_signal(messages: List[Dict], heuristic_calls: List[Dict]) -> Tuple[float, Dict[str, float]]:
+    """
+    Explicit task complexity estimate in [0, 1].
+    Higher means the request is more likely to benefit from deeper reasoning/fallback.
+    """
+    text = _latest_user_text(messages)
+    segments = _split_segments(text) if text else []
+    token_count = len(re.findall(r"\b\w+\b", text))
+    call_count = len(heuristic_calls)
+
+    pronoun_refs = len(re.findall(r"\b(him|her|them|it|that|there)\b", text, re.IGNORECASE))
+    cross_step_cues = len(re.findall(r"\b(then|after|before|if|unless|when)\b", text, re.IGNORECASE))
+    ambiguous_cues = len(re.findall(r"\b(maybe|probably|around|somewhere|something)\b", text, re.IGNORECASE))
+
+    factors = {
+        "multi_call": min(1.0, max(0, call_count - 1) * 0.22),
+        "segment_load": min(1.0, max(0, len(segments) - 1) * 0.18),
+        "pronoun_refs": min(1.0, pronoun_refs * 0.15),
+        "cross_step": min(1.0, cross_step_cues * 0.20),
+        "length": min(1.0, max(0, token_count - 12) / 24.0 * 0.35),
+        "ambiguity": min(1.0, ambiguous_cues * 0.18),
+    }
+
+    score = min(1.0, sum(factors.values()))
+    return score, factors
+
+
 def generate_cactus(messages, tools):
     """Run function calling on-device via FunctionGemma + Cactus."""
     cactus_api = _load_cactus()
@@ -332,13 +359,21 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
     """
     start = time.time()
     heuristic_calls, heuristic_conf = _heuristic_route(messages, tools)
+    complexity_score, complexity_factors = _complexity_signal(messages, heuristic_calls)
     heuristic_time_ms = (time.time() - start) * 1000
+    cactus_available = bool(_load_cactus())
+    cloud_available = _load_genai()[0] is not None
 
-    if heuristic_calls and heuristic_conf >= 0.70:
+    # Explicitly complexity-aware local acceptance:
+    # - Low/medium complexity can stay with heuristic if confidence is strong.
+    # - High complexity prefers deeper local reasoning when available.
+    if heuristic_calls and heuristic_conf >= 0.70 and (complexity_score < 0.65 or not cactus_available):
         return {
             "function_calls": heuristic_calls,
             "total_time_ms": heuristic_time_ms,
             "confidence": heuristic_conf,
+            "complexity_score": complexity_score,
+            "complexity_factors": complexity_factors,
             "source": "on-device",
             "strategy": "heuristic-local-router",
         }
@@ -351,6 +386,8 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
             "function_calls": heuristic_calls,
             "total_time_ms": heuristic_time_ms + local.get("total_time_ms", 0),
             "confidence": max(heuristic_conf, local.get("confidence", 0)),
+            "complexity_score": complexity_score,
+            "complexity_factors": complexity_factors,
             "source": "on-device",
             "strategy": "heuristic-plus-cactus",
         }
@@ -360,12 +397,28 @@ def generate_hybrid(messages, tools, confidence_threshold=0.99):
         local["strategy"] = "cactus-local"
         local["total_time_ms"] = local.get("total_time_ms", 0) + heuristic_time_ms
         local["confidence"] = max(local.get("confidence", 0), heuristic_conf)
+        local["complexity_score"] = complexity_score
+        local["complexity_factors"] = complexity_factors
         return local
+
+    # If both local stages are weak and cloud isn't available, still return best local heuristic output.
+    if not cloud_available:
+        return {
+            "function_calls": heuristic_calls,
+            "total_time_ms": heuristic_time_ms + local.get("total_time_ms", 0),
+            "confidence": max(heuristic_conf, local.get("confidence", 0)),
+            "complexity_score": complexity_score,
+            "complexity_factors": complexity_factors,
+            "source": "on-device",
+            "strategy": "heuristic-no-cloud-available",
+        }
 
     cloud = generate_cloud(messages, tools)
     cloud["source"] = "cloud (fallback)"
     cloud["strategy"] = "cloud-after-local"
     cloud["local_confidence"] = max(local.get("confidence", 0), heuristic_conf)
+    cloud["complexity_score"] = complexity_score
+    cloud["complexity_factors"] = complexity_factors
     cloud["total_time_ms"] += local.get("total_time_ms", 0) + heuristic_time_ms
     return cloud
 
