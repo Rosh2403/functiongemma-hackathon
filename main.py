@@ -479,11 +479,11 @@ def print_result(label: str, result: Dict) -> None:
     for key in ("source", "strategy", "provider"):
         if key in result:
             print(f"{key.capitalize()}: {result[key]}")
-    if result.get("stage1_difficulty") is not None:
+    if "stage1_difficulty" in result and result["stage1_difficulty"] is not None:
         print(f"Stage1 difficulty:  {result['stage1_difficulty']:.4f}")
-    if result.get("stage2_confidence") is not None:
+    if "stage2_confidence" in result and result["stage2_confidence"] is not None:
         print(f"Stage2 confidence:  {result['stage2_confidence']:.4f}")
-    if result.get("model_confidence") is not None:
+    if "model_confidence" in result and result["model_confidence"] is not None:
         print(f"Model confidence:   {result['model_confidence']:.4f}")
     print(f"Total time: {result.get('total_time_ms', 0):.2f}ms")
     for call in result.get("function_calls", []):
@@ -511,7 +511,7 @@ if __name__ == "__main__":
     messages = [{"role": "user", "content": "What is the weather in San Francisco?"}]
 
     on_device = generate_cactus(messages, tools)
-    print_result("FunctionGemma (On-Device)", on_device)
+    print_result("FunctionGemma (On-Device Cactus)", on_device)
 
     cloud = generate_cloud(messages, tools)
     print_result("Cloud (Anthropic / Gemini)", cloud)
