@@ -240,3 +240,31 @@ for chunk in chunks:
 ## Next steps:
 - Join the [Reddit channel](https://www.reddit.com/r/cactuscompute/), ask any technical questions there.
 - To gain some technical insights on AI, checkout [Maths, CS & AI Compendium](https://github.com/HenryNdubuaku/maths-cs-ai-compendium). 
+## End-to-End Product Demo (Rubric 2)
+
+Run full pipeline from user text -> hybrid routing -> actual tool execution:
+
+```bash
+python product_demo.py --text "Send a message to Alice saying good morning and get the weather in Singapore."
+```
+
+Notes:
+- Weather uses real Open-Meteo APIs (geocoding + current conditions).
+- Messages/alarms/timers/reminders are persisted to `data/actions_state.json`.
+- Contacts are loaded from `data/contacts.json`.
+- Optional webhook delivery for messages:
+  - `export MESSAGE_WEBHOOK_URL="https://your-endpoint.example/send"`
+
+## Voice-to-Action Demo (Rubric 3)
+
+Run voice -> `cactus_transcribe` -> hybrid routing -> execution:
+
+```bash
+python voice_action.py --audio ./sample.wav --whisper weights/whisper-small
+```
+
+Output includes:
+- `transcript`
+- routing `source` and `strategy`
+- `function_calls`
+- tool execution results
